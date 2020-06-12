@@ -16,9 +16,11 @@ use bitflags::bitflags;
 use crate::ansi::{Color, NamedColor};
 use crate::grid;
 use crate::index::Column;
+use arrayvec::ArrayString;
 
 // Maximum number of zerowidth characters which will be stored per cell.
 pub const MAX_ZEROWIDTH_CHARS: usize = 5;
+pub const MAX_CELL_LEN: usize = 4 * (1 + MAX_ZEROWIDTH_CHARS);
 
 bitflags! {
     pub struct Flags: u16 {
@@ -38,11 +40,10 @@ bitflags! {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Cell {
-    pub c: char,
     pub fg: Color,
     pub bg: Color,
     pub flags: Flags,
-    pub extra: [char; MAX_ZEROWIDTH_CHARS],
+    pub contents: ArrayString<[u8; MAX_CELL_LEN]>,
 }
 
 impl Default for Cell {
@@ -70,7 +71,7 @@ impl LineLength for grid::Row<Cell> {
         }
 
         for (index, cell) in self[..].iter().rev().enumerate() {
-            if cell.c != ' ' || cell.extra[0] != ' ' {
+            if cell.contents.as_str() != " " {
                 length = Column(self.len() - index);
                 break;
             }
@@ -97,9 +98,10 @@ impl Cell {
     }
 
     pub fn new(c: char, fg: Color, bg: Color) -> Cell {
+        let mut contents = ArrayString::new();
+        contents.push(c);
         Cell {
-            extra: [' '; MAX_ZEROWIDTH_CHARS],
-            c,
+            contents,
             bg,
             fg,
             flags: Flags::empty(),
@@ -108,8 +110,7 @@ impl Cell {
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        (self.c == ' ' || self.c == '\t')
-            && self.extra[0] == ' '
+        (self.contents.as_str() == " " || self.contents.as_str() == "\t")
             && self.bg == Color::Named(NamedColor::Background)
             && !self
                 .flags
@@ -123,27 +124,45 @@ impl Cell {
     }
 
     #[inline]
-    pub fn chars(&self) -> [char; MAX_ZEROWIDTH_CHARS + 1] {
-        unsafe {
-            let mut chars = [std::mem::uninitialized(); MAX_ZEROWIDTH_CHARS + 1];
-            std::ptr::write(&mut chars[0], self.c);
-            std::ptr::copy_nonoverlapping(
-                self.extra.as_ptr(),
-                chars.as_mut_ptr().offset(1),
-                self.extra.len(),
-            );
-            chars
+    pub fn as_str(&self) -> arrayvec::ArrayString<[u8; MAX_CELL_LEN]> {
+        self.contents
+    }
+
+    #[inline]
+    pub fn chars(&self) -> [char; 1 + MAX_ZEROWIDTH_CHARS] {
+        let mut out = [' '; 1 + MAX_ZEROWIDTH_CHARS];
+        for (i, chr) in self
+            .contents
+            .as_str()
+            .chars()
+            .enumerate()
+            .take(1 + MAX_ZEROWIDTH_CHARS)
+        {
+            out[i] = chr;
         }
+        out
     }
 
     #[inline]
     pub fn push_extra(&mut self, c: char) {
-        for elem in self.extra.iter_mut() {
-            if elem == &' ' {
-                *elem = c;
-                break;
-            }
-        }
+        self.contents.push(c);
+    }
+
+    #[inline]
+    pub fn first_char(&self) -> char {
+        self.contents
+            .as_str()
+            .chars()
+            .next()
+            .expect("cell should always have at least one char")
+    }
+
+    #[inline]
+    pub fn set_char(&mut self, chr: char) -> ArrayString<[u8; MAX_CELL_LEN]> {
+        let mut contents = ArrayString::new();
+        contents.push(chr);
+        std::mem::swap(&mut self.contents, &mut contents);
+        contents
     }
 }
 
@@ -158,7 +177,7 @@ mod tests {
     fn line_length_works() {
         let template = Cell::default();
         let mut row = Row::new(Column(10), &template);
-        row[Column(5)].c = 'a';
+        row[Column(5)].set_char('a');
 
         assert_eq!(row.line_length(), Column(6));
     }

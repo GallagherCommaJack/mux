@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use std::{io, ptr};
 
 use arraydeque::ArrayDeque;
+use arrayvec::ArrayString;
 use unicode_width::UnicodeWidthChar;
 
 use crate::ansi::{
@@ -29,7 +30,7 @@ use crate::grid::{
 };
 use crate::index;
 use crate::selection::{self, Locations, Selection};
-use crate::term::cell::{Cell, LineLength};
+use crate::term::cell::{Cell, LineLength, MAX_CELL_LEN};
 
 pub mod cell;
 
@@ -55,7 +56,7 @@ impl Search for Term {
         let last_col = self.grid.num_cols() - index::Column(1);
 
         while let Some(cell) = iter.prev() {
-            if self.semantic_escape_chars.contains(cell.c) {
+            if self.semantic_escape_chars.contains(cell.first_char()) {
                 break;
             }
 
@@ -77,7 +78,7 @@ impl Search for Term {
         let last_col = self.grid.num_cols() - index::Column(1);
 
         while let Some(cell) = iter.next() {
-            if self.semantic_escape_chars.contains(cell.c) {
+            if self.semantic_escape_chars.contains(cell.first_char()) {
                 break;
             }
 
@@ -244,7 +245,7 @@ impl<'a> RenderableCellsIter<'a> {
         cursor_cell.bg = cursor_color;
 
         let mut wide_cell = cursor_cell;
-        wide_cell.c = ' ';
+        wide_cell.set_char(' ');
 
         self.push_cursor_cells(original_cell, cursor_cell, wide_cell);
     }
@@ -254,11 +255,11 @@ impl<'a> RenderableCellsIter<'a> {
 
         let mut cursor_cell = self.grid[self.cursor];
         let cursor_color = Color::Named(NamedColor::Cursor);
-        cursor_cell.c = cursor_cell_char;
+        cursor_cell.set_char(cursor_cell_char);
         cursor_cell.fg = cursor_color;
 
         let mut wide_cell = cursor_cell;
-        wide_cell.c = wide_cell_char;
+        wide_cell.set_char(wide_cell_char);
 
         self.push_cursor_cells(original_cell, cursor_cell, wide_cell);
     }
@@ -356,10 +357,10 @@ pub struct RenderableCell {
     /// A _Display_ line (not necessarily an _Active_ line)
     pub line: index::Line,
     pub column: index::Column,
-    pub chars: [char; cell::MAX_ZEROWIDTH_CHARS + 1],
     pub fg: Color,
     pub bg: Color,
     pub flags: cell::Flags,
+    pub contents: ArrayString<[u8; MAX_CELL_LEN]>,
 }
 
 impl<'a> Iterator for RenderableCellsIter<'a> {
@@ -413,10 +414,10 @@ impl<'a> Iterator for RenderableCellsIter<'a> {
             let bg = cell.bg;
 
             return Some(RenderableCell {
+                contents: cell.contents,
                 line: cell.line,
                 column: cell.column,
                 flags: cell.flags,
-                chars: cell.chars(),
                 fg,
                 bg,
             });
@@ -537,7 +538,9 @@ pub struct Cursor {
 }
 
 impl Cursor {
-    pub fn attributes(&self) -> Cell { self.template }
+    pub fn attributes(&self) -> Cell {
+        self.template
+    }
 }
 
 pub struct VisualBell {
@@ -813,8 +816,6 @@ impl Term {
             }
         }
 
-        use std::ops::Range;
-
         trait Append: PushChar {
             fn append(
                 &mut self,
@@ -852,19 +853,16 @@ impl Term {
                             // Skip over whitespace until next tab-stop once a tab was found
                             if tabs[col] {
                                 tab_mode = false;
-                            } else if cell.c == ' ' {
+                            } else if cell.contents.as_str() == " " {
                                 continue;
                             }
                         }
 
                         if !cell.flags.contains(cell::Flags::WIDE_CHAR_SPACER) {
-                            self.push(cell.c);
-                            for c in (&cell.chars()[1..]).iter().filter(|c| **c != ' ') {
-                                self.push(*c);
-                            }
+                            self.push_str(cell.as_str().as_str());
                         }
 
-                        if cell.c == '\t' {
+                        if cell.contents.as_str() == "\t" {
                             tab_mode = true;
                         }
                     }
@@ -1254,7 +1252,7 @@ impl ansi::Handler for Term {
                     .flags
                     .contains(cell::Flags::WIDE_CHAR_SPACER)
                 {
-                    col.saturating_sub(1);
+                    drop(col.saturating_sub(1));
                 }
                 self.grid[line][index::Column(col)].push_extra(c);
                 return;
@@ -1262,7 +1260,7 @@ impl ansi::Handler for Term {
 
             let cell = &mut self.grid[&self.cursor.point];
             *cell = self.cursor.template;
-            cell.c = self.cursor.charsets[self.active_charset].map(c);
+            cell.set_char(self.cursor.charsets[self.active_charset].map(c));
 
             // Handle wide chars
             if width == 2 {
@@ -1407,8 +1405,8 @@ impl ansi::Handler for Term {
             count -= 1;
 
             let cell = &mut self.grid[&self.cursor.point];
-            if cell.c == ' ' {
-                cell.c = self.cursor.charsets[self.active_charset].map('\t');
+            if cell.contents.as_str() == " " {
+                cell.set_char(self.cursor.charsets[self.active_charset].map('\t'));
             }
 
             loop {
@@ -1902,7 +1900,7 @@ impl ansi::Handler for Term {
     fn dectest(&mut self) {
         trace!("Dectesting");
         let mut template = self.cursor.template;
-        template.c = 'E';
+        template.set_char('E');
 
         self.grid.region_mut(..).each(|c| c.reset(&template));
     }
@@ -1968,12 +1966,12 @@ mod tests {
         let mut grid: Grid<Cell> = Grid::new(index::Line(3), index::Column(5), 0, Cell::default());
         for i in 0..5 {
             for j in 0..2 {
-                grid[index::Line(j)][index::Column(i)].c = 'a';
+                grid[index::Line(j)][index::Column(i)].set_char('a');
             }
         }
-        grid[index::Line(0)][index::Column(0)].c = '"';
-        grid[index::Line(0)][index::Column(3)].c = '"';
-        grid[index::Line(1)][index::Column(2)].c = '"';
+        grid[index::Line(0)][index::Column(0)].set_char('"');
+        grid[index::Line(0)][index::Column(3)].set_char('"');
+        grid[index::Line(1)][index::Column(2)].set_char('"');
         grid[index::Line(0)][index::Column(4)]
             .flags
             .insert(cell::Flags::WRAPLINE);
@@ -2022,10 +2020,10 @@ mod tests {
         let mut term = Term::new(size);
         let mut grid: Grid<Cell> = Grid::new(index::Line(1), index::Column(5), 0, Cell::default());
         for i in 0..5 {
-            grid[index::Line(0)][index::Column(i)].c = 'a';
+            grid[index::Line(0)][index::Column(i)].set_char('a');
         }
-        grid[index::Line(0)][index::Column(0)].c = '"';
-        grid[index::Line(0)][index::Column(3)].c = '"';
+        grid[index::Line(0)][index::Column(0)].set_char('"');
+        grid[index::Line(0)][index::Column(3)].set_char('"');
 
         mem::swap(&mut term.grid, &mut grid);
 
@@ -2052,7 +2050,7 @@ mod tests {
         for l in 0..3 {
             if l != 1 {
                 for c in 0..3 {
-                    grid[index::Line(l)][index::Column(c)].c = 'a';
+                    grid[index::Line(l)][index::Column(c)].set_char('a');
                 }
             }
         }
@@ -2096,7 +2094,7 @@ mod tests {
         );
         term.input('a');
 
-        assert_eq!(term.grid()[&cursor].c, '▒');
+        assert_eq!(term.grid()[&cursor].first_char(), '▒');
     }
 
     #[test]
