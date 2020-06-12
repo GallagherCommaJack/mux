@@ -1,8 +1,8 @@
 #[macro_use]
 extern crate log;
 
-mod grid;
-mod index;
+pub mod grid;
+pub mod index;
 
 pub mod ansi;
 pub mod mode;
